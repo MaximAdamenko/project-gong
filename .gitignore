@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Generated pipeline outputs
+Speech_Detector/output/
+
+# Project docs / session logs (private, not for repo)
+development_agent/
+
+# Torch / model cache
+.cache/
+*.pt
+*.pth
+
+# Private meeting recordings — never commit
+*.mp4
+*.mp3
+*.mkv
+*.mov
+*.wav
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# VSCode
+.vscode/
+
+# Build / dist
+dist/
+build/
+*.egg-info/

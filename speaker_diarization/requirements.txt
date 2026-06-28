@@ -1,0 +1,7 @@
+resemblyzer
+librosa
+scikit-learn
+soundfile
+numpy
+webrtcvad-wheels
+pyaudio
