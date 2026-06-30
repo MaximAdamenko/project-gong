@@ -1,0 +1,28 @@
+# Project Gong — combined requirements (all four teams + run_all.py)
+# Install: pip install -r requirements.txt
+# Also requires ffmpeg on PATH:
+#   Windows: winget install Gyan.FFmpeg
+#   macOS:   brew install ffmpeg
+
+# ── Video / image ──────────────────────────────────────────────────────────
+opencv-python
+numpy
+
+# ── Team 1: Speech Detection ───────────────────────────────────────────────
+torch
+torchaudio
+soundfile
+librosa
+webrtcvad-wheels
+
+# ── Team 2: Speaker Diarization ───────────────────────────────────────────
+resemblyzer
+scikit-learn
+pyaudio
+
+# ── Team 3: Face Detection ────────────────────────────────────────────────
+ultralytics
+huggingface_hub
+
+# ── Team 4: Lip Movement Detection ────────────────────────────────────────
+mediapipe

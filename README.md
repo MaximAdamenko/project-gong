@@ -4,6 +4,32 @@ Estimates **how many participants** were in a Zoom recording and **how many of t
 
 ---
 
+## Quick Start — One Command
+
+```bash
+pip install -r requirements.txt
+python run_all.py Gong_Test_VIDEO.mp4
+```
+
+Opens a live window showing:
+- Face bounding boxes updating in real time (green = speaking, gray = silent)
+- Side panel with per-participant speaking status and live counts
+- Audio analysis progress bar (Teams 1+2 running in background)
+- Final estimate when audio is done
+
+```
+python run_all.py                          # uses Gong_Test_VIDEO.mp4
+python run_all.py meeting.mp4              # your own video
+python run_all.py meeting.mp4 --no-audio   # skip audio, video-only (faster)
+python run_all.py meeting.mp4 --yolo-every 3   # detect faces more often
+```
+
+> Also requires **ffmpeg** on PATH: `winget install Gyan.FFmpeg` (Windows) / `brew install ffmpeg` (macOS)
+
+> Team 4 model: `face_landmarker.task` is downloaded automatically on first run (~30 MB).
+
+---
+
 ## Goal
 
 Given a Zoom meeting recording (`Gong_Test_VIDEO.mp4`), output:
