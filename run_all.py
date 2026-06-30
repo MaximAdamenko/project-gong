@@ -6,6 +6,8 @@ Usage:
     python run_all.py meeting.mp4
     python run_all.py meeting.mp4 --no-audio
     python run_all.py meeting.mp4 --yolo-every 3   # more frequent detection (slower)
+    python run_all.py meeting.mp4 --realtime       # play the whole video at true speed
+    python run_all.py meeting.mp4 --sound          # play the video's audio (not muted)
 
 What it does:
     1. Scans the first few hundred frames to discover stable face tile positions
@@ -15,6 +17,10 @@ What it does:
        - Side panel: participant list, live counts, audio analysis progress
     3. Runs Teams 1+2 (speech detection + diarization) in a background thread
     4. Computes and displays the final estimate when audio is done
+
+With --realtime the video plays at its actual speed and skips frames if the
+machine falls behind, so it always reaches the end. --sound additionally plays
+the original audio track through ffplay (implies --realtime to stay in sync).
 
 Press Q or ESC to quit.
 """
@@ -26,6 +32,7 @@ import threading
 import time
 import json
 import math
+import subprocess
 import urllib.request
 from pathlib import Path
 from collections import deque
@@ -41,11 +48,12 @@ for _p in ["Face_Detection", "Participants_lips_moving", "Speech_Detector", "spe
 PANEL_W      = 295        # sidebar width in pixels
 YOLO_EVERY   = 5          # run YOLO every N frames (higher = faster but less smooth)
 MAR_WINDOW   = 60         # rolling frames for lip-movement detection
-STD_THR      = 0.035      # MAR std threshold → speaking
-SLOT_RADIUS  = 0.18       # fraction of frame width/height for face slot clustering
-MIN_PRESENCE = 0.04       # fraction of scan frames a face must appear in to count
-SCAN_EVERY   = 5          # frame skip during the initial participant scan
-SCAN_FRAMES  = 400        # how many frames to scan (more = more accurate, slower start)
+MAR_MIN      = 20         # need this many MAR samples before judging speaking
+STD_ON       = 0.045      # MAR std above this -> SPEAKING (hysteresis high edge)
+STD_OFF      = 0.030      # MAR std below this -> silent   (hysteresis low edge)
+SLOT_RADIUS  = 0.14       # tile clustering radius (0.14 keeps the 7 real tiles distinct)
+MIN_PRESENCE = 0.10       # fraction of scan frames a face must appear in to count
+SCAN_FRAMES  = 250        # frames sampled ACROSS THE WHOLE video to find participants
 
 MP_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
@@ -79,36 +87,9 @@ class State:
         self.estimate   = None        # dict when ready
 
 
-# ── Background audio thread (Teams 1 + 2) ───────────────────────────────────
-def run_audio(video_path: Path, out_dir: Path, state: State):
-    state.audio_st = "running"
-    try:
-        wav = out_dir / "meeting.wav"
-        seg = out_dir / "segments.json"
-        spk = out_dir / "speakers.json"
-
-        from audio_io import prepare_audio
-        audio, sr = prepare_audio(str(video_path), output_path=str(wav))
-        state.audio_pct = 0.30
-
-        from detectors.silero import detect_silero
-        from writer import write_segments
-        segments = detect_silero(audio, sr)
-        write_segments(segments, str(seg))
-        state.audio_pct = 0.65
-
-        from speaker_diarization import diarize
-        result = diarize(str(wav), str(seg), str(spk), threshold=0.55)
-        state.audio_pct = 1.0
-
-        n = len(set(s["speaker_id"] for s in result)) if result else 0
-        with state.lock:
-            state.audio_spk = n
-            state.audio_st  = "done"
-
-    except Exception as e:
-        with state.lock:
-            state.audio_st = f"error: {e}"
+# Teams 1 + 2 (speech detection + diarization) run in a SEPARATE PROCESS
+# (audio_worker.py), not a thread: the torch/resemblyzer audio stack and the
+# MediaPipe+YOLO live stack crash if loaded in one process. See audio_worker.py.
 
 
 # ── MediaPipe helpers ────────────────────────────────────────────────────────
@@ -135,37 +116,61 @@ def mouth_aspect_ratio(landmarks, w, h):
 
 
 # ── Face slot helpers ────────────────────────────────────────────────────────
-def nearest_slot(cx, cy, slots):
-    best, bd = None, 1e9
-    for s in slots:
-        d = math.hypot(cx - s["cx"], cy - s["cy"])
-        if d < bd:
-            best, bd = s, d
-    return best["label"] if (best and bd <= SLOT_RADIUS) else None
+def assign_faces_to_slots(faces, slots, slot_radius):
+    """Greedy nearest one-to-one matching of detected faces to fixed tile slots.
+
+    Each slot and each face is used at most once, so two faces sharing one Zoom
+    tile (e.g. a woman and a child) map to two different slots and are BOTH
+    tracked, instead of one overwriting the other every frame.
+
+    faces : list of (cx, cy, box_norm).  Returns {label: box_norm}.
+    """
+    pairs = []
+    for fidx, (cx, cy, _box) in enumerate(faces):
+        for s in slots:
+            d = math.hypot(cx - s["cx"], cy - s["cy"])
+            if d <= slot_radius:
+                pairs.append((d, fidx, s["label"]))
+    pairs.sort(key=lambda p: p[0])
+
+    used_face, used_slot, out = set(), set(), {}
+    for d, fidx, lbl in pairs:
+        if fidx in used_face or lbl in used_slot:
+            continue
+        used_face.add(fidx)
+        used_slot.add(lbl)
+        out[lbl] = faces[fidx][2]
+    return out
 
 
-def scan_participants(model, video_path: Path, W: int, H: int) -> list:
-    """Quick scan of first SCAN_FRAMES frames to discover stable face tile positions."""
+def scan_participants(model, video_path: Path, W: int, H: int, slot_radius: float) -> list:
+    """Discover stable face tile positions by sampling across the WHOLE video.
+
+    Sampling the whole video (not just the opening) is essential: a participant
+    whose tile is only visible part of the time (e.g. someone who leans in and out
+    of frame) would be missed by an opening-only scan and never counted.
+    """
     cap   = cv2.VideoCapture(str(video_path))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     raw   = []  # list of (cx, cy) normalized detections
     seen  = 0
-    fi    = 0
 
-    print(f"  Scanning first {min(SCAN_FRAMES, total)} frames "
-          f"(every {SCAN_EVERY}th) to discover participants...", flush=True)
+    n_samples = min(SCAN_FRAMES, max(total, 1))
+    step      = max(1, total // n_samples)
 
-    while seen < SCAN_FRAMES and fi < total:
+    print(f"  Scanning {n_samples} frames across the whole video "
+          f"to discover participants...", flush=True)
+
+    for k in range(n_samples):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, k * step)
         ret, frame = cap.read()
         if not ret:
-            break
-        if fi % SCAN_EVERY == 0:
-            res = model.predict(frame, conf=0.25, imgsz=640, verbose=False)
-            if res and res[0].boxes is not None:
-                for (x1, y1, x2, y2) in res[0].boxes.xyxy.cpu().numpy():
-                    raw.append(((x1 + x2) / (2 * W), (y1 + y2) / (2 * H)))
-            seen += 1
-        fi += 1
+            continue
+        res = model.predict(frame, conf=0.25, imgsz=640, verbose=False)
+        if res and res[0].boxes is not None:
+            for (x1, y1, x2, y2) in res[0].boxes.xyxy.cpu().numpy():
+                raw.append(((x1 + x2) / (2 * W), (y1 + y2) / (2 * H)))
+        seen += 1
 
     cap.release()
 
@@ -177,7 +182,7 @@ def scan_participants(model, video_path: Path, W: int, H: int) -> list:
             d = math.hypot(cx - s["cx"], cy - s["cy"])
             if d < bd:
                 best, bd = s, d
-        if best and bd <= SLOT_RADIUS:
+        if best and bd <= slot_radius:
             n = best["count"]
             best["cx"] = (best["cx"] * n + cx) / (n + 1)
             best["cy"] = (best["cy"] * n + cy) / (n + 1)
@@ -245,12 +250,7 @@ def draw_side_panel(panel, state: State, fps: float, fi: int, total: int):
     if st == "pending":
         txt("waiting to start...", y, GRAY, 0.44)
     elif st == "running":
-        bw = W - 24
-        cv2.rectangle(panel, (12, y - 10), (12 + bw, y + 4), DIVIDER, -1)
-        filled = int(bw * state.audio_pct)
-        cv2.rectangle(panel, (12, y - 10), (12 + filled, y + 4), GREEN, -1)
-        txt(f"{int(state.audio_pct * 100)}%  analyzing...", y + 18, GREEN, 0.44)
-        y += 14
+        txt("analyzing in background...", y, GREEN, 0.44)
     elif st == "done":
         txt(f"Speakers detected: {state.audio_spk}", y, GREEN, 0.52, bold=True)
     elif st == "skipped":
@@ -296,7 +296,7 @@ def draw_face_overlays(frame, state: State, disp_W: int, disp_H: int):
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
 
-        tag = f"{lbl}  {'● SPEAKING' if spk else '○ silent'}"
+        tag = f"{lbl}  {'SPEAKING' if spk else 'silent'}"
         (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
         tag_y = max(0, y1 - th - 8)
         cv2.rectangle(frame, (x1, tag_y), (x1 + tw + 8, y1), color, -1)
@@ -313,9 +313,19 @@ def main():
                     help="Skip audio analysis (Teams 1+2) for faster startup")
     ap.add_argument("--yolo-every", type=int, default=YOLO_EVERY,
                     help=f"Run YOLO every N frames (default: {YOLO_EVERY})")
+    ap.add_argument("--realtime", action="store_true",
+                    help="Play the whole video at its real speed (skips frames to keep up)")
+    ap.add_argument("--sound", action="store_true",
+                    help="Play the video's audio via ffplay (implies --realtime)")
+    ap.add_argument("--slot-radius", type=float, default=SLOT_RADIUS,
+                    help=f"Tile clustering radius (default {SLOT_RADIUS}; lower it to split "
+                         f"two people sharing one tile, raise it if one face splits in two)")
     ap.add_argument("--output-dir", default=str(HERE / "output"),
                     help="Directory for all generated output files (default: output/)")
     args = ap.parse_args()
+
+    realtime    = args.realtime or args.sound
+    slot_radius = args.slot_radius
 
     video_path = Path(args.input)
     if not video_path.exists():
@@ -341,19 +351,26 @@ def main():
 
     # ── Scan participants ─────────────────────────────────────────────────────
     print("[3/3] Scanning participants...")
-    slots = scan_participants(yolo, video_path, W, H)
+    slots = scan_participants(yolo, video_path, W, H, slot_radius)
     with state.lock:
         state.slots   = slots
         state.mar_win = {s["label"]: deque(maxlen=MAR_WINDOW) for s in slots}
         state.speaking = {s["label"]: False for s in slots}
 
-    # ── Start audio background thread ─────────────────────────────────────────
+    # ── Start audio analysis in a SEPARATE PROCESS (Teams 1 + 2) ──────────────
+    analysis_proc     = None
+    audio_result_path = None
     if not args.no_audio:
         audio_dir = HERE / "Speech_Detector" / "output"
         audio_dir.mkdir(parents=True, exist_ok=True)
-        threading.Thread(
-            target=run_audio, args=(video_path, audio_dir, state), daemon=True
-        ).start()
+        audio_result_path = audio_dir / "audio_result.json"
+        if audio_result_path.exists():
+            audio_result_path.unlink()   # clear any stale result from a previous run
+        analysis_proc = subprocess.Popen(
+            [sys.executable, str(HERE / "audio_worker.py"), str(video_path), str(audio_dir)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        state.audio_st = "running"
     else:
         state.audio_st = "skipped"
 
@@ -363,32 +380,58 @@ def main():
     DISP_H = int(H * DISP_W / W)
 
     cached_boxes = {}  # label -> (nx1,ny1,nx2,ny2) from last YOLO run
-    t0    = time.time()
     fi    = 0
     fps_d = 0.0
 
+    # ── Optional audio playback (original track, via ffplay) ──────────────────
+    audio_proc = None
+    if args.sound:
+        try:
+            audio_proc = subprocess.Popen(
+                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                 "-i", str(video_path)],
+            )
+        except FileNotFoundError:
+            print("  WARNING: ffplay not found (install ffmpeg) — playing without sound.")
+
     print("\nLive display started — press Q or ESC to quit.\n")
+    t0 = time.time()   # clock that both the video and the audio follow
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
         fi += 1
+
+        # ── Real-time pacing: keep the video at true speed and reach the end ──
+        if realtime:
+            target = int((time.time() - t0) * fps_v)
+            # behind schedule -> skip ahead so we always finish the whole video
+            while fi < target:
+                if not cap.grab():
+                    break
+                fi += 1
+            if fi != target:  # we skipped frames; refresh to the latest one
+                ok, f2 = cap.retrieve()
+                if ok:
+                    frame = f2
+            # ahead of schedule -> wait so playback isn't too fast / stays in sync
+            ahead = (fi / fps_v) - (time.time() - t0)
+            if ahead > 0:
+                time.sleep(min(ahead, 0.05))
+
         fps_d = fi / max(time.time() - t0, 1e-3)
 
         # ── YOLO face detection (every N frames) ─────────────────────────────
         if fi % args.yolo_every == 0:
             res = yolo.predict(frame, conf=0.28, imgsz=640, verbose=False)
-            new_boxes = {}
+            faces = []  # (cx, cy, box_norm) — every detected face, two-per-tile included
             if res and res[0].boxes is not None:
                 for (x1, y1, x2, y2) in res[0].boxes.xyxy.cpu().numpy():
                     cx = (x1 + x2) / (2 * W)
                     cy = (y1 + y2) / (2 * H)
-                    lbl = nearest_slot(cx, cy, slots)
-                    if lbl:
-                        new_boxes[lbl] = (x1 / W, y1 / H, x2 / W, y2 / H)
-            cached_boxes = new_boxes
+                    faces.append((cx, cy, (x1 / W, y1 / H, x2 / W, y2 / H)))
+            cached_boxes = assign_faces_to_slots(faces, slots, slot_radius)
             with state.lock:
                 state.boxes = dict(cached_boxes)
 
@@ -421,11 +464,32 @@ def main():
             except Exception:
                 pass
 
-            # Update speaking status from rolling window
+            # Update speaking status with hysteresis: a face only turns SPEAKING
+            # above STD_ON and only turns silent again below STD_OFF. The gap
+            # stops brief mouth movements (smiles, yawns, jitter) from flickering
+            # a silent person to "speaking".
             win = state.mar_win[lbl]
-            if len(win) >= 10:
+            if len(win) >= MAR_MIN:
+                std = float(np.std(win))
                 with state.lock:
-                    state.speaking[lbl] = float(np.std(win)) > STD_THR
+                    if state.speaking.get(lbl, False):
+                        if std < STD_OFF:
+                            state.speaking[lbl] = False
+                    elif std > STD_ON:
+                        state.speaking[lbl] = True
+
+        # ── Poll the audio-analysis subprocess ────────────────────────────────
+        if analysis_proc is not None and state.audio_st == "running" \
+                and analysis_proc.poll() is not None:
+            if analysis_proc.returncode == 0 and audio_result_path and audio_result_path.exists():
+                try:
+                    with open(audio_result_path) as f:
+                        state.audio_spk = int(json.load(f)["speakers"])
+                    state.audio_st = "done"
+                except Exception as e:
+                    state.audio_st = f"error: {e}"
+            else:
+                state.audio_st = "error: audio analysis failed (see console)"
 
         # ── Compute final estimate when audio finishes ────────────────────────
         if state.audio_st == "done" and state.estimate is None:
@@ -457,21 +521,42 @@ def main():
                     print(f"  WARNING: {w}")
 
         # ── Draw frame ────────────────────────────────────────────────────────
-        disp  = cv2.resize(frame, (DISP_W, DISP_H))
-        draw_face_overlays(disp, state, DISP_W, DISP_H)
+        # Guarded so a single bad frame / draw error can't silently close the
+        # window (which would look like "the video ended after a few seconds").
+        try:
+            disp  = cv2.resize(frame, (DISP_W, DISP_H))
+            draw_face_overlays(disp, state, DISP_W, DISP_H)
 
-        panel = np.zeros((DISP_H, PANEL_W, 3), dtype=np.uint8)
-        draw_side_panel(panel, state, fps_d, fi, total_frames)
+            panel = np.zeros((DISP_H, PANEL_W, 3), dtype=np.uint8)
+            draw_side_panel(panel, state, fps_d, fi, total_frames)
 
-        window = np.hstack([disp, panel])
-        cv2.imshow("Project Gong — Live Analyzer", window)
+            window = np.hstack([disp, panel])
+            cv2.imshow("Project Gong — Live Analyzer", window)
+        except Exception:
+            import traceback
+            print(f"[DRAW ERROR at frame {fi}]")
+            traceback.print_exc()
+            continue
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), ord("Q"), 27):  # Q or ESC
             break
 
+    elapsed = time.time() - t0
+    print(f"\n[VIDEO LOOP ENDED] showed {fi}/{total_frames} frames in {elapsed:.0f}s "
+          f"({fi / max(total_frames, 1) * 100:.0f}% of the video).")
+
+    # ── Shut everything down so NOTHING keeps running in the background ────────
     cap.release()
     cv2.destroyAllWindows()
+    cv2.waitKey(1)   # required on Windows for the window to actually disappear
+    for proc in (audio_proc, analysis_proc):
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                proc.kill()
 
     # ── Final summary ─────────────────────────────────────────────────────────
     print("\n" + "=" * 52)
@@ -500,4 +585,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        # torch / MediaPipe can leave native threads alive that keep the process
+        # running after the window closes. Force a hard exit so nothing lingers
+        # in the background (subprocesses were already terminated in main()).
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)

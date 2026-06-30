@@ -12,6 +12,11 @@ env/
 
 # Generated pipeline outputs
 Speech_Detector/output/
+output/
+*/output/
+
+# Downloaded MediaPipe model (fetched on first run)
+*.task
 
 # Project docs / session logs (private, not for repo)
 development_agent/

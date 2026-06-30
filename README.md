@@ -8,25 +8,48 @@ Estimates **how many participants** were in a Zoom recording and **how many of t
 
 ```bash
 pip install -r requirements.txt
-python run_all.py Gong_Test_VIDEO.mp4
+python run_all.py --sound
 ```
 
 Opens a live window showing:
 - Face bounding boxes updating in real time (green = speaking, gray = silent)
 - Side panel with per-participant speaking status and live counts
-- Audio analysis progress bar (Teams 1+2 running in background)
-- Final estimate when audio is done
+- Audio speaker analysis (Teams 1+2) running in a background **process**
+- Final estimate when the audio analysis finishes
 
 ```
-python run_all.py                          # uses Gong_Test_VIDEO.mp4
-python run_all.py meeting.mp4              # your own video
-python run_all.py meeting.mp4 --no-audio   # skip audio, video-only (faster)
-python run_all.py meeting.mp4 --yolo-every 3   # detect faces more often
+python run_all.py                          # uses Gong_Test_VIDEO.mp4, no sound
+python run_all.py --sound                  # play the video's audio (implies --realtime)
+python run_all.py --realtime               # play the whole video at true speed, muted
+python run_all.py meeting.mp4 --sound      # your own video, with sound
+python run_all.py meeting.mp4 --no-audio   # skip speaker analysis (video-only, faster)
+python run_all.py meeting.mp4 --slot-radius 0.10   # tune two-people-per-tile splitting
 ```
 
-> Also requires **ffmpeg** on PATH: `winget install Gyan.FFmpeg` (Windows) / `brew install ffmpeg` (macOS)
+**Controls (while the window is focused):** `Q` / `Esc` to quit.
 
-> Team 4 model: `face_landmarker.task` is downloaded automatically on first run (~30 MB).
+> **Requires `ffmpeg` *and* `ffplay` on PATH** (both ship with ffmpeg):
+> `winget install Gyan.FFmpeg` (Windows) / `brew install ffmpeg` (macOS).
+> After installing on Windows, **open a new terminal** so PATH is picked up.
+
+> Team 4 model `face_landmarker.task` (~30 MB) downloads automatically on first run.
+
+### How it runs (and why it's robust)
+
+`run_all.py` is the GUI/orchestrator: it loads YOLOv8-Face + MediaPipe, discovers
+participants by **sampling across the whole video** (so people whose tile is only
+visible part of the time are still counted), then plays the video while detecting
+faces and lip movement live. The speaker analysis (Teams 1+2 — torch / Silero /
+Resemblyzer) runs in a **separate process** (`audio_worker.py`): its native
+runtime conflicts with MediaPipe+YOLO in one process and would crash the window,
+so it is fully isolated. On exit, every subprocess is terminated — nothing is
+left running in the background.
+
+| Tuning (top of `run_all.py`) | Meaning |
+|------------------------------|---------|
+| `SLOT_RADIUS` (0.14) | tile clustering radius — lower to split two people in one tile, raise if one face splits in two |
+| `STD_ON` / `STD_OFF` (0.045 / 0.030) | lip-movement speaking thresholds (hysteresis — stops smiles/jitter false positives) |
+| `MIN_PRESENCE` (0.10) | fraction of scanned frames a tile must appear in to count as a participant |
 
 ---
 
@@ -68,6 +91,9 @@ Gong_Test_VIDEO.mp4
 ```
 project-gong/
 ├── Gong_Test_VIDEO.mp4                    ← shared input (all teams read from here)
+├── run_all.py                             ← one-command live UI (GUI + orchestrator)
+├── audio_worker.py                        ← Teams 1+2 as an isolated subprocess
+├── presentation.html                      ← self-contained slide deck (open in a browser)
 ├── estimate.py                            ← Step 5: combine all outputs → final count
 ├── estimate_output.json                   ← final result (generated)
 │

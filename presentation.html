@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Gong — How Many People Were in the Meeting?</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#111a24; --panel:#162232; --line:#243446;
+    --ink:#e8eef5; --muted:#8a9bb0; --dim:#5e7088;
+    --t1:#46c2ff; --t2:#8b6dff; --t3:#2dd4a7; --t4:#ffb347; --accent:#ffd166;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    overflow:hidden;
+  }
+  .deck{height:100vh; width:100vw; position:relative}
+  .slide{
+    position:absolute; inset:0; display:none;
+    flex-direction:column; justify-content:center;
+    padding:5vh 7vw; opacity:0; transition:opacity .35s ease;
+  }
+  .slide.active{display:flex; opacity:1}
+  h1{font-size:clamp(34px,5.2vw,68px); line-height:1.05; letter-spacing:-.02em}
+  h2{font-size:clamp(26px,3.4vw,44px); margin-bottom:.5em; letter-spacing:-.01em}
+  h3{font-size:clamp(17px,1.7vw,22px); color:var(--muted); font-weight:600}
+  p,li{font-size:clamp(15px,1.55vw,21px); line-height:1.5; color:var(--ink)}
+  .muted{color:var(--muted)}
+  .accent{color:var(--accent)}
+  .tag{
+    display:inline-block; font-size:14px; font-weight:700; letter-spacing:.14em;
+    text-transform:uppercase; padding:6px 14px; border-radius:30px; margin-bottom:18px;
+  }
+  .kicker{color:var(--muted); font-size:clamp(15px,1.6vw,20px); margin-top:14px; max-width:62ch}
+  ul{list-style:none; margin-top:10px}
+  li{margin:.55em 0; padding-left:1.4em; position:relative}
+  li::before{content:"▸"; position:absolute; left:0; color:var(--accent)}
+  .grid{display:grid; gap:18px; margin-top:6px}
+  .g2{grid-template-columns:1fr 1fr}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px 24px}
+  .card h4{font-size:18px; margin-bottom:8px}
+  .card p{font-size:16px; color:var(--muted); line-height:1.45}
+  .num{font-size:clamp(34px,4vw,52px); font-weight:800; line-height:1}
+  .flow{display:flex; align-items:stretch; gap:0; margin-top:22px; flex-wrap:wrap}
+  .node{flex:1; min-width:150px; background:var(--panel); border:1px solid var(--line);
+        border-radius:12px; padding:16px; text-align:center}
+  .node .lbl{font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted)}
+  .node .nm{font-size:18px; font-weight:700; margin:6px 0}
+  .node .out{font-size:12.5px; color:var(--muted); font-family:ui-monospace,Menlo,Consolas,monospace}
+  .arrow{display:flex; align-items:center; color:var(--dim); font-size:26px; padding:0 8px}
+  table{border-collapse:collapse; width:100%; margin-top:14px; font-size:clamp(14px,1.5vw,19px)}
+  th,td{text-align:left; padding:11px 16px; border-bottom:1px solid var(--line)}
+  th{color:var(--muted); font-weight:600; font-size:14px; letter-spacing:.04em; text-transform:uppercase}
+  tr.hi td{color:var(--accent); font-weight:700}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+  .formula{background:var(--bg2); border:1px solid var(--line); border-left:4px solid var(--accent);
+           border-radius:10px; padding:18px 22px; margin-top:16px; font-family:ui-monospace,Menlo,Consolas,monospace;
+           font-size:clamp(15px,1.7vw,22px)}
+  .t1c{color:var(--t1)} .t2c{color:var(--t2)} .t3c{color:var(--t3)} .t4c{color:var(--t4)}
+  .t1bg{background:rgba(70,194,255,.13); color:var(--t1)}
+  .t2bg{background:rgba(139,109,255,.15); color:var(--t2)}
+  .t3bg{background:rgba(45,212,167,.13); color:var(--t3)}
+  .t4bg{background:rgba(255,179,71,.14); color:var(--t4)}
+  .progress{position:fixed; top:0; left:0; height:3px; background:var(--accent); z-index:10; transition:width .35s}
+  .counter{position:fixed; bottom:20px; right:26px; color:var(--dim); font-size:14px; letter-spacing:.05em}
+  .brand{position:fixed; bottom:20px; left:26px; color:var(--dim); font-size:14px; letter-spacing:.18em; text-transform:uppercase}
+  .hint{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); color:var(--dim); font-size:12.5px}
+  .big-list li{font-size:clamp(16px,1.9vw,24px); margin:.7em 0}
+  .center{align-items:center; text-align:center}
+  .center .kicker{text-align:center}
+</style>
+</head>
+<body>
+<div class="progress" id="bar"></div>
+<div class="deck" id="deck">
+
+  <section class="slide active center">
+    <div class="tag t3bg">Computer Vision · Audio AI · Team Project</div>
+    <h1>Project&nbsp;Gong</h1>
+    <h3 style="margin-top:14px; font-size:clamp(20px,2.4vw,30px); color:var(--ink)">
+      How many people were in the Zoom call —<br>and how many of them actually spoke?</h3>
+    <p class="kicker" style="margin-top:22px">
+      Four independent teams, two senses (sound + sight), one combined estimate —
+      shown live from a single command.</p>
+  </section>
+
+  <section class="slide">
+    <h3>The challenge</h3>
+    <h2>One recording in. Two numbers out.</h2>
+    <div class="grid g2" style="margin-top:26px">
+      <div class="card">
+        <div class="num t3c">Total</div>
+        <h4 style="margin-top:10px">How many participants</h4>
+        <p>Count the distinct people on screen across the whole meeting.</p>
+      </div>
+      <div class="card">
+        <div class="num accent">Speaking</div>
+        <h4 style="margin-top:10px">How many actually spoke</h4>
+        <p>Cross-check two independent signals: their <b>voice</b> and their <b>lips</b>.</p>
+      </div>
+    </div>
+    <p class="kicker" style="margin-top:24px">
+      The trick: <b class="accent">no single signal is trustworthy alone.</b>
+      Audio misses silent listeners; video mistakes a smile for speech. We combine them.</p>
+  </section>
+
+  <section class="slide">
+    <h3>System overview</h3>
+    <h2>Four pipelines, two senses</h2>
+    <div class="flow">
+      <div class="node"><div class="lbl t1c">Team 1 · Sound</div><div class="nm">Speech Detection</div><div class="out">segments.json</div></div>
+      <div class="arrow">→</div>
+      <div class="node"><div class="lbl t2c">Team 2 · Sound</div><div class="nm">Speaker Diarization</div><div class="out">speakers.json</div></div>
+    </div>
+    <div class="flow">
+      <div class="node"><div class="lbl t3c">Team 3 · Sight</div><div class="nm">Face Detection</div><div class="out">faces_output.json</div></div>
+      <div class="arrow">→</div>
+      <div class="node"><div class="lbl t4c">Team 4 · Sight</div><div class="nm">Lip Movement</div><div class="out">lips_output.json</div></div>
+    </div>
+    <div class="flow">
+      <div class="node" style="border-color:var(--accent); flex:0 0 auto; padding:16px 40px">
+        <div class="lbl accent">Step 5 · Fusion</div><div class="nm">estimate.py</div>
+        <div class="out">total + speaking</div>
+      </div>
+    </div>
+    <p class="kicker" style="margin-top:18px">Each team owns a stage and a JSON contract — the next team only reads the file. Clean handoffs, no shared state.</p>
+  </section>
+
+  <section class="slide">
+    <span class="tag t1bg">Team 1 — Sound</span>
+    <h2 class="t1c">Speech Detection (VAD)</h2>
+    <p class="kicker">Find <b>when</b> anyone is talking — slice the audio into speech segments, drop the silence.</p>
+    <div class="grid g2" style="margin-top:20px">
+      <div class="card"><h4>How</h4>
+        <p>Extract 16 kHz mono audio with ffmpeg, then run <b>Silero VAD</b> (a neural voice-activity model). Benchmarked vs an energy detector and WebRTC VAD.</p></div>
+      <div class="card"><h4>Why Silero</h4>
+        <p>Finer, cleaner segment boundaries → better speaker embeddings for Team 2.</p></div>
+    </div>
+    <table>
+      <tr><th>Method</th><th>Segments</th><th>Total speech</th><th>IoU vs WebRTC</th></tr>
+      <tr><td>energy</td><td>90</td><td>620 s</td><td>0.944</td></tr>
+      <tr class="hi"><td>silero ✓</td><td>153</td><td>530 s</td><td>0.880</td></tr>
+      <tr><td>webrtc</td><td>106</td><td>602 s</td><td>reference</td></tr>
+    </table>
+  </section>
+
+  <section class="slide">
+    <span class="tag t2bg">Team 2 — Sound</span>
+    <h2 class="t2c">Speaker Diarization</h2>
+    <p class="kicker">Find <b>who</b> is talking — group speech segments by voice identity to count unique speakers.</p>
+    <div class="grid g2" style="margin-top:20px">
+      <div class="card"><h4>1 · Voice fingerprint</h4>
+        <p>For each segment, <b>Resemblyzer</b> produces a d-vector embedding — a fingerprint of that voice.</p></div>
+      <div class="card"><h4>2 · Cluster the voices</h4>
+        <p><b>Agglomerative clustering</b> on cosine distance merges segments that sound like the same person.</p></div>
+    </div>
+    <div class="formula">threshold 0.55 &nbsp;→&nbsp; <span class="muted">higher = fewer speakers · lower = more speakers</span></div>
+    <p class="kicker" style="margin-top:16px">On the test recording: <b class="t2c">4 unique speakers</b> across 153 segments. This is the audio-based speaking count.</p>
+  </section>
+
+  <section class="slide">
+    <span class="tag t3bg">Team 3 — Sight</span>
+    <h2 class="t3c">Face Detection &amp; Tile Tracking</h2>
+    <p class="kicker">Find <b>how many people</b> — detect every face, give each Zoom tile a stable identity.</p>
+    <div class="grid g2" style="margin-top:20px">
+      <div class="card"><h4>Detect</h4>
+        <p><b>YOLOv8-Face</b> finds every face in each frame as a normalized bounding box.</p></div>
+      <div class="card"><h4>Stabilize → "slots"</h4>
+        <p>Face centers cluster into fixed <b>tile slots</b>, so each participant keeps one <span class="mono">face_id</span>. Transient/background faces are filtered out.</p></div>
+    </div>
+    <div class="formula">Scan across the <b>whole video</b>, not just the opening &nbsp;→&nbsp; someone whose tile is only sometimes visible is still counted.</div>
+    <p class="kicker" style="margin-top:14px">Result on the test video: <b class="t3c">7 participants</b> — the authoritative total.</p>
+  </section>
+
+  <section class="slide">
+    <span class="tag t4bg">Team 4 — Sight</span>
+    <h2 class="t4c">Lip-Movement Detection</h2>
+    <p class="kicker">Find <b>who is speaking on camera</b> — measure each tracked face's mouth motion over time.</p>
+    <div class="grid g2" style="margin-top:20px">
+      <div class="card"><h4>Mouth Aspect Ratio (MAR)</h4>
+        <p><b>MediaPipe</b> lip landmarks give MAR = vertical lip gap ÷ mouth width — scale-invariant, works at any tile size.</p></div>
+      <div class="card"><h4>Movement = speech</h4>
+        <p>A talking mouth makes MAR <b>fluctuate</b>; high variance over a window → speaking. A still or smiling mouth stays flat.</p></div>
+    </div>
+    <p class="kicker" style="margin-top:16px"><b>Live robustness:</b> hysteresis (separate on/off thresholds) stops brief smiles, nods, and jitter from flickering a silent person to "speaking".</p>
+  </section>
+
+  <section class="slide">
+    <span class="tag" style="background:rgba(255,209,102,.16); color:var(--accent)">Step 5 — Fusion</span>
+    <h2>Combining the four signals</h2>
+    <div class="formula" style="margin-top:18px">
+      total &nbsp;= &nbsp;<span class="t3c">faces detected</span> &nbsp;<span class="muted">(Team 3)</span><br><br>
+      speaking &nbsp;= &nbsp;round( ( <span class="t2c">audio speakers</span> + <span class="t4c">lip speakers</span> ) / 2 )
+      &nbsp;<span class="muted">→ clamped to total</span>
+    </div>
+    <div class="grid g2" style="margin-top:20px">
+      <div class="card"><h4>Sanity check 1</h4><p>Speaking can never exceed total → capped, with a warning.</p></div>
+      <div class="card"><h4>Sanity check 2</h4><p>Below ~70% speaking raises a warning to re-check thresholds.</p></div>
+    </div>
+    <p class="kicker" style="margin-top:16px">Averaging two independent estimators makes the result robust to either one being noisy.</p>
+  </section>
+
+  <section class="slide">
+    <h3>One command · live UI</h3>
+    <h2><span class="mono">python run_all.py --sound</span></h2>
+    <div class="grid g2" style="margin-top:20px">
+      <div class="card"><h4>On screen</h4>
+        <ul style="margin-top:4px">
+          <li>Green/gray face boxes — speaking vs silent, live</li>
+          <li>Side panel: per-person status + running totals</li>
+          <li>Original audio plays in sync; final estimate when ready</li>
+        </ul></div>
+      <div class="card"><h4>Built to be robust</h4>
+        <ul style="margin-top:4px">
+          <li>Heavy audio analysis runs in an <b>isolated process</b></li>
+          <li>(torch + MediaPipe in one process crashes — so they're split)</li>
+          <li>Plays through the whole video; clean exit, nothing left running</li>
+        </ul></div>
+    </div>
+    <p class="kicker" style="margin-top:18px">Detection paces to real time and skips frames if the CPU falls behind, so playback always reaches the end.</p>
+  </section>
+
+  <section class="slide center">
+    <div class="tag t3bg">Summary</div>
+    <h1>Two senses beat one.</h1>
+    <ul class="big-list" style="margin-top:24px; text-align:left">
+      <li><span class="t1c">Team 1</span> hears <b>when</b> someone talks</li>
+      <li><span class="t2c">Team 2</span> hears <b>who</b> is talking</li>
+      <li><span class="t3c">Team 3</span> sees <b>how many</b> people are there</li>
+      <li><span class="t4c">Team 4</span> sees <b>whose lips</b> are moving</li>
+      <li><span class="accent">Step 5</span> fuses them into one trustworthy answer</li>
+    </ul>
+    <p class="kicker" style="margin-top:26px">Thank you — questions?</p>
+  </section>
+
+</div>
+
+<div class="brand">Project Gong</div>
+<div class="counter"><span id="cur">1</span> / <span id="tot">10</span></div>
+<div class="hint">← → or Space to navigate · F for fullscreen</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  let i=0;
+  const bar=document.getElementById('bar'),cur=document.getElementById('cur'),tot=document.getElementById('tot');
+  tot.textContent=slides.length;
+  function show(n){
+    i=Math.max(0,Math.min(slides.length-1,n));
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    bar.style.width=((i+1)/slides.length*100)+'%';
+    cur.textContent=i+1;
+  }
+  function next(){show(i+1)} function prev(){show(i-1)}
+  document.addEventListener('keydown',e=>{
+    if(['ArrowRight','PageDown',' '].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){show(0);} else if(e.key==='End'){show(slides.length-1);}
+    else if(e.key==='f'||e.key==='F'){
+      if(!document.fullscreenElement)document.documentElement.requestFullscreen(); else document.exitFullscreen();
+    }
+  });
+  let sx=0;
+  document.addEventListener('touchstart',e=>sx=e.touches[0].clientX);
+  document.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-sx; if(Math.abs(dx)>50){dx<0?next():prev();}});
+  document.getElementById('deck').addEventListener('click',e=>{ if(e.clientX>window.innerWidth*0.5)next(); else prev(); });
+  show(0);
+</script>
+</body>
+</html>
