@@ -3,7 +3,7 @@ from loader import load_face_boxes
 from reporter import report
 
 
-def run_pipeline(video_path, faces_json, model_path, method="std", threshold=None, frame_skip=3):
+def run_pipeline(video_path, faces_json, model_path, method="std", threshold=None, frame_skip=3, output_path=None):
     print(f"[1/3] loading face boxes from {faces_json}")
     boxes_by_frame, total_participants, fps = load_face_boxes(faces_json)
     fs = fps / frame_skip  # effective MAR sampling rate
@@ -24,4 +24,4 @@ def run_pipeline(video_path, faces_json, model_path, method="std", threshold=Non
         decisions  = detect_speaking(series, fs=fs, threshold=thr)
         score_map  = scores(series, fs=fs)
 
-    return report(series, decisions, score_map, total_participants, method)
+    return report(series, decisions, score_map, total_participants, method, output_path=output_path)
